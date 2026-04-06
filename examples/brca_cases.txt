@@ -1,0 +1,13 @@
+# TCGA-BRCA example case submitter IDs
+# Usage: python3 download_tcga_svs.py --project TCGA-BRCA --cases examples/brca_cases.txt
+
+TCGA-A1-A0SD
+TCGA-A1-A0SE
+TCGA-A1-A0SF
+TCGA-A1-A0SG
+TCGA-A1-A0SH
+TCGA-A2-A04N
+TCGA-A2-A04P
+TCGA-A2-A04Q
+TCGA-A2-A04R
+TCGA-A2-A04T

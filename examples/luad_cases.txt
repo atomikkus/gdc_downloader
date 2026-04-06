@@ -1,0 +1,14 @@
+# TCGA-LUAD example case submitter IDs
+# One ID per line. Lines starting with # are ignored by the script — remove this header if needed.
+# Usage: python3 download_tcga_svs.py --project TCGA-LUAD --cases examples/luad_cases.txt
+
+TCGA-05-4244
+TCGA-05-4249
+TCGA-05-4250
+TCGA-05-4382
+TCGA-05-4389
+TCGA-05-4395
+TCGA-05-4396
+TCGA-05-4397
+TCGA-05-4398
+TCGA-05-4402

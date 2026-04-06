@@ -1,0 +1,13 @@
+# TCGA-COAD (Colon Adenocarcinoma) example case submitter IDs
+# Usage: python3 download_tcga_svs.py --project TCGA-COAD --cases examples/coad_cases.txt
+
+TCGA-3L-AA1B
+TCGA-4N-A93T
+TCGA-4T-AA8H
+TCGA-5M-AAT4
+TCGA-5M-AAT5
+TCGA-5M-AAT6
+TCGA-A6-2671
+TCGA-A6-2672
+TCGA-A6-2674
+TCGA-A6-2676
