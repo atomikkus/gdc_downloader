@@ -204,6 +204,36 @@ def sync_local_to_gcs(local_dir: Path, gcs_uri: str) -> None:
     )
 
 
+def sync_files_to_gcs(file_paths: list[Path], gcs_uri: str) -> None:
+    if not file_paths:
+        return
+
+    destination = gcs_uri.rstrip("/") + "/"
+    sources = [str(path) for path in file_paths]
+
+    gsutil_cmd = shutil.which("gsutil")
+    if gsutil_cmd:
+        cmd = [gsutil_cmd, "-m", "cp", "-n", *sources, destination]
+        print(f"\n[4/4] Syncing batch ({len(file_paths)} files) to GCS with gsutil …")
+        print(f"      Command: {' '.join(cmd)}")
+        subprocess.run(cmd, check=True)
+        print("   ✓ Batch GCS sync completed.")
+        return
+
+    gcloud_cmd = shutil.which("gcloud")
+    if gcloud_cmd:
+        cmd = [gcloud_cmd, "storage", "cp", "--no-clobber", *sources, destination]
+        print(f"\n[4/4] Syncing batch ({len(file_paths)} files) to GCS with gcloud …")
+        print(f"      Command: {' '.join(cmd)}")
+        subprocess.run(cmd, check=True)
+        print("   ✓ Batch GCS sync completed.")
+        return
+
+    raise RuntimeError(
+        "Neither gsutil nor gcloud CLI was found in PATH. Install Google Cloud SDK tools to use local->GCS sync mode."
+    )
+
+
 def cleanup_local_dir(local_dir: Path) -> None:
     if not local_dir.exists():
         return
@@ -242,6 +272,10 @@ def parse_args() -> argparse.Namespace:
         help="When using --output with --output-gcs, keep local files after successful GCS sync (default is cleanup)."
     )
     parser.add_argument(
+        "--batch-gb", type=float, default=50.0,
+        help="In hybrid mode (--output with --output-gcs), upload and cleanup after this much completed local data (GB). Default: 50"
+    )
+    parser.add_argument(
         "--cases", "-c", type=Path, default=None,
         help="Text file with case/sample submitter IDs (one per line) to filter downloads"
     )
@@ -252,6 +286,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--dry-run", action="store_true",
         help="Query and list files without downloading"
+    )
+    parser.add_argument(
+        "--auto-yes", "-y", action="store_true",
+        help="Skip confirmation prompt and start transfer immediately"
     )
     return parser.parse_args()
 
@@ -276,6 +314,9 @@ def main() -> None:
     args = parse_args()
     if args.workers < 1:
         print("[ERROR] --workers must be >= 1")
+        sys.exit(1)
+    if args.batch_gb <= 0:
+        print("[ERROR] --batch-gb must be > 0")
         sys.exit(1)
 
     hybrid_sync_mode = bool(args.output and args.output_gcs)
@@ -328,15 +369,21 @@ def main() -> None:
     else:
         destination = str(save_dir)
     print(f"      Destination: {destination}\n")
-    ans = input("Proceed with download? [y/N] ").strip().lower()
-    if ans not in ("y", "yes"):
-        print("Download cancelled.")
-        sys.exit(0)
+    if args.auto_yes:
+        print("Auto-confirm enabled (--auto-yes). Proceeding without prompt.")
+    else:
+        ans = input("Proceed with download? [y/N] ").strip().lower()
+        if ans not in ("y", "yes"):
+            print("Download cancelled.")
+            sys.exit(0)
 
     # 3. Download
     save_dir.mkdir(parents=True, exist_ok=True)
     print(f"\n[3/3] Downloading {len(files)} file(s) with {args.workers} worker(s) …")
     show_progress = args.workers == 1
+    batch_threshold_bytes = int(args.batch_gb * (1024**3))
+    pending_batch_files: list[Path] = []
+    pending_batch_bytes = 0
 
     def transfer_one(file_info: dict) -> tuple[str, str | None]:
         file_name = file_info["file_name"]
@@ -362,6 +409,7 @@ def main() -> None:
         except Exception as e:
             return file_name, str(e)
 
+    file_info_by_name = {f["file_name"]: f for f in files}
     errors = 0
     with ThreadPoolExecutor(max_workers=args.workers) as executor:
         futures = {executor.submit(transfer_one, f): f for f in files}
@@ -370,8 +418,37 @@ def main() -> None:
             if error:
                 errors += 1
                 print(f"\n[{idx}/{len(files)}] [ERROR] Failed: {file_name}: {error}")
-            elif not show_progress:
+                continue
+
+            if not show_progress:
                 print(f"\n[{idx}/{len(files)}] ✓ Completed: {file_name}")
+
+            if hybrid_sync_mode:
+                file_path = save_dir / file_name
+                if file_path.exists():
+                    pending_batch_files.append(file_path)
+                    pending_batch_bytes += file_path.stat().st_size
+                else:
+                    expected_size = file_info_by_name[file_name].get("file_size", 0)
+                    if expected_size:
+                        pending_batch_bytes += expected_size
+
+                if pending_batch_bytes >= batch_threshold_bytes and pending_batch_files:
+                    batch_size_gb = pending_batch_bytes / (1024**3)
+                    print(
+                        f"\n   [batch] Threshold reached (~{batch_size_gb:.2f} GB). "
+                        f"Syncing {len(pending_batch_files)} files to GCS …"
+                    )
+                    sync_files_to_gcs(pending_batch_files, args.output_gcs)
+                    if args.keep_local:
+                        print("   [batch] Keeping local files as requested (--keep-local).")
+                    else:
+                        for path in pending_batch_files:
+                            if path.exists():
+                                path.unlink()
+                        print(f"   [batch] Cleaned {len(pending_batch_files)} local file(s).")
+                    pending_batch_files = []
+                    pending_batch_bytes = 0
 
     print("\n" + "=" * 60)
     if hybrid_sync_mode:
@@ -386,10 +463,22 @@ def main() -> None:
 
     if hybrid_sync_mode and not errors:
         try:
-            sync_local_to_gcs(save_dir, args.output_gcs)
-            if args.keep_local:
-                print("   Keeping local files as requested (--keep-local).")
-            else:
+            if pending_batch_files:
+                remaining_size_gb = pending_batch_bytes / (1024**3)
+                print(
+                    f"\n   [batch] Final flush (~{remaining_size_gb:.2f} GB, "
+                    f"{len(pending_batch_files)} files) …"
+                )
+                sync_files_to_gcs(pending_batch_files, args.output_gcs)
+                if args.keep_local:
+                    print("   [batch] Keeping local files as requested (--keep-local).")
+                else:
+                    for path in pending_batch_files:
+                        if path.exists():
+                            path.unlink()
+                    print(f"   [batch] Cleaned {len(pending_batch_files)} local file(s).")
+
+            if not args.keep_local:
                 cleanup_local_dir(save_dir)
         except Exception as e:
             print(f"\n[ERROR] Local download succeeded, but GCS sync failed: {e}")
